@@ -110,9 +110,8 @@ make image     # container image
 
 ## CI
 
-The GitHub Actions workflow lives at [`ci/github-ci.yml`](ci/github-ci.yml). Copy it to
-`.github/workflows/ci.yml` to enable it (pushing to that path needs a token with the
-`workflow` scope).
+GitHub Actions runs `go vet`, `go test -race` and `go build` on every push and PR
+(see [`.github/workflows/ci.yml`](.github/workflows/ci.yml)).
 
 ## License
 
