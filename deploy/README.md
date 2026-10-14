@@ -34,3 +34,16 @@ patches:
 O Secret da CA emissora (e, se o responder OCSP tiver TLS de uma PKI interna, o
 `OCSP_CA_FILE` apontando para o bundle dessa PKI) ficam no seu overlay — este repo não
 carrega nada específico de ambiente.
+
+## Teste de integração (ponta a ponta, contra um Vault real)
+
+Em `internal/authz/integration_test.go` (build tag `integration`, pulado no CI). Emite
+certs frescos, revoga um, e roda a matriz (válido→allow+header, cache hit, revogado→401,
+header vazio→sem injeção, responder morto→fail-closed) contra o responder OCSP do Vault:
+
+```bash
+VAULT_ADDR=https://vault.stage.cora.local \
+VAULT_TOKEN="$(cat ~/.vault-stage.token)" \
+VAULT_PKI=cora_int_direta_pki VAULT_ROLE=cora-integration \
+go test -tags integration -run TestE2E -v ./internal/authz/
+```
