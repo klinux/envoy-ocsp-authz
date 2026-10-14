@@ -1,6 +1,10 @@
 # O Envoy precisa (a) validar a cadeia do cert de cliente e (b) montar o XFCC do handshake,
 # descartando qualquer XFCC que o cliente mande (SanitizeSet). Sem isso, o cliente poderia
 # forjar o header que o ext_authz vai ler.
+#
+# Estrutura do kgateway v2.4.x:
+#   - clientCertificateValidation fica em spec.default (nível do listener);
+#   - forwardClientCertDetails fica em spec.default.httpSettings (config do HCM).
 apiVersion: gateway.kgateway.dev/v1alpha1
 kind: ListenerPolicy
 metadata:
@@ -12,13 +16,14 @@ spec:
       kind: Gateway
       name: my-mtls-gateway
   default:
-    forwardClientCertDetails:
-      mode: SanitizeSet
-      details:
-        cert: true     # escreve o PEM do leaf no XFCC (campo Cert=)
     clientCertificateValidation:
       mode: Require
       caCertificateRefs:
         - group: ""
           kind: Secret
           name: client-ca    # Secret com ca.crt da CA emissora dos certs de cliente
+    httpSettings:
+      forwardClientCertDetails:
+        mode: SanitizeSet
+        details:
+          cert: true         # escreve o PEM do leaf no XFCC (campo Cert=)

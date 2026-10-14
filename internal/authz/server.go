@@ -34,11 +34,11 @@ type Metrics interface {
 // Server implementa authv3.AuthorizationServer.
 type Server struct {
 	authv3.UnimplementedAuthorizationServer
-	issuer      *x509.Certificate
-	checker     checker
-	metrics     Metrics
-	headerName  string // header injetado para o upstream (default ssl-client-cert)
-	now         func() time.Time
+	issuer     *x509.Certificate
+	checker    checker
+	metrics    Metrics
+	headerName string // header injetado para o upstream (default ssl-client-cert)
+	now        func() time.Time
 }
 
 // Config configura o Server.
@@ -59,9 +59,7 @@ func NewServer(c Config) *Server {
 		headerName: c.HeaderName,
 		now:        c.Now,
 	}
-	if s.headerName == "" {
-		s.headerName = "ssl-client-cert"
-	}
+	// headerName vazio = allow/deny puro, sem injetar header no upstream.
 	if s.now == nil {
 		s.now = time.Now
 	}
@@ -101,6 +99,9 @@ func (s *Server) decide(ctx context.Context, req *authv3.CheckRequest) (string, 
 	}
 	switch status {
 	case ocsp.StatusGood:
+		if s.headerName == "" {
+			return "good", allow("", "") // só allow, sem injetar header
+		}
 		return "good", allow(s.headerName, encodeCertHeader(leaf))
 	case ocsp.StatusRevoked:
 		return "revoked", deny()
@@ -124,18 +125,19 @@ func (s *Server) verifyIssuedByCA(leaf *x509.Certificate) error {
 	return nil
 }
 
-// allow responde OK e injeta o header verificado, sobrescrevendo qualquer valor do cliente.
+// allow responde OK. Se headerName não for vazio, injeta o header verificado,
+// sobrescrevendo qualquer valor que o cliente tenha mandado.
 func allow(headerName, headerValue string) *authv3.CheckResponse {
+	ok := &authv3.OkHttpResponse{}
+	if headerName != "" {
+		ok.Headers = []*corev3.HeaderValueOption{{
+			Header:       &corev3.HeaderValue{Key: headerName, Value: headerValue},
+			AppendAction: corev3.HeaderValueOption_OVERWRITE_IF_EXISTS_OR_ADD,
+		}}
+	}
 	return &authv3.CheckResponse{
-		Status: &rpcstatus.Status{Code: int32(codes.OK)},
-		HttpResponse: &authv3.CheckResponse_OkResponse{
-			OkResponse: &authv3.OkHttpResponse{
-				Headers: []*corev3.HeaderValueOption{{
-					Header:       &corev3.HeaderValue{Key: headerName, Value: headerValue},
-					AppendAction: corev3.HeaderValueOption_OVERWRITE_IF_EXISTS_OR_ADD,
-				}},
-			},
-		},
+		Status:       &rpcstatus.Status{Code: int32(codes.OK)},
+		HttpResponse: &authv3.CheckResponse_OkResponse{OkResponse: ok},
 	}
 }
 

@@ -56,6 +56,7 @@ type Verifier struct {
 	cache        *cache
 	maxBodyBytes int64
 	cacheCap     time.Duration // teto do TTL de cache, independente do nextUpdate
+	maxAge       time.Duration // idade máxima tolerada de uma resposta sem nextUpdate
 	allowedHosts []string      // se não vazio, só consulta responders nesses hosts (anti-SSRF)
 	now          func() time.Time
 }
@@ -66,8 +67,22 @@ type Option func(*Verifier)
 // WithCacheTTLCap limita o TTL de cache (a resposta ainda nunca é cacheada além do nextUpdate).
 func WithCacheTTLCap(d time.Duration) Option { return func(v *Verifier) { v.cacheCap = d } }
 
-// WithHTTPClient injeta um http.Client (ex.: com timeout e trust do Vault).
+// WithHTTPClient injeta um http.Client (ex.: com timeout e trust do responder).
+// Redirects devem ficar desabilitados no client para não furar o allowlist de host.
 func WithHTTPClient(c *http.Client) Option { return func(v *Verifier) { v.httpClient = c } }
+
+// WithMaxResponseAge define a idade máxima de uma resposta OCSP que não traz nextUpdate
+// (fail-closed: sem nextUpdate e mais velha que isto, é rejeitada).
+func WithMaxResponseAge(d time.Duration) Option { return func(v *Verifier) { v.maxAge = d } }
+
+// noRedirectClient devolve um http.Client que NÃO segue redirects — um responder permitido
+// não pode redirecionar para um host interno (anti-SSRF).
+func noRedirectClient(timeout time.Duration) *http.Client {
+	return &http.Client{
+		Timeout:       timeout,
+		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+	}
+}
 
 // WithClock injeta o relógio (para testes).
 func WithClock(f func() time.Time) Option { return func(v *Verifier) { v.now = f } }
@@ -104,10 +119,11 @@ func (v *Verifier) hostAllowed(rawURL string) bool {
 // New cria um Verifier.
 func New(opts ...Option) *Verifier {
 	v := &Verifier{
-		httpClient:   &http.Client{Timeout: 5 * time.Second},
+		httpClient:   noRedirectClient(5 * time.Second),
 		cache:        newCache(4096),
 		maxBodyBytes: 1 << 20, // 1 MiB; respostas OCSP são pequenas
 		cacheCap:     10 * time.Minute,
+		maxAge:       24 * time.Hour, // resposta sem nextUpdate só vale por este tempo após thisUpdate
 		now:          time.Now,
 	}
 	for _, o := range opts {
@@ -151,12 +167,12 @@ func (v *Verifier) Check(ctx context.Context, cert, issuer *x509.Certificate) (S
 			lastErr = err
 			continue
 		}
-		status, err := interpret(resp, v.now())
+		status, err := interpret(resp, v.now(), v.maxAge)
 		if err != nil {
 			lastErr = err
 			continue
 		}
-		v.cache.put(cacheKey(cert, issuer), status, cacheExpiry(resp, v.now(), v.cacheCap))
+		v.cache.put(cacheKey(cert, issuer), status, cacheExpiry(resp, v.now(), v.cacheCap, v.maxAge))
 		return status, nil
 	}
 	return StatusUnknown, fmt.Errorf("todos os responders OCSP falharam: %w", lastErr)
@@ -184,23 +200,48 @@ func (v *Verifier) query(ctx context.Context, url string, reqDER []byte, cert, i
 		return nil, fmt.Errorf("ler resposta OCSP: %w", err)
 	}
 
-	// ParseResponseForCert confere a assinatura (issuer ou responder delegado com
-	// EKU OCSPSigning) e que a resposta cobre ESTE certificado (CertID). O nonce é
-	// opcional e não é exigido aqui — o Vault não devolve nonce.
+	// ParseResponseForCert confere a assinatura e que a resposta cobre ESTE certificado
+	// (CertID). O nonce é opcional e não é exigido — o Vault não devolve nonce.
 	resp, err := ocsp.ParseResponseForCert(body, cert, issuer)
 	if err != nil {
 		return nil, fmt.Errorf("resposta OCSP inválida de %s: %w", url, err)
 	}
+	// x/crypto/ocsp valida a assinatura, mas NÃO checa o EKU do responder delegado.
+	// Se a resposta foi assinada por um cert embutido (não a própria CA), ele precisa
+	// carregar id-kp-OCSPSigning — senão qualquer cert emitido pela CA (ex.: um cert de
+	// cliente) poderia assinar respostas OCSP. Fail-closed.
+	if resp.Certificate != nil && !hasOCSPSigningEKU(resp.Certificate) {
+		return nil, fmt.Errorf("responder delegado de %s sem EKU id-kp-OCSPSigning", url)
+	}
 	return resp, nil
 }
 
+// hasOCSPSigningEKU verifica o EKU id-kp-OCSPSigning (1.3.6.1.5.5.7.3.9).
+func hasOCSPSigningEKU(cert *x509.Certificate) bool {
+	for _, eku := range cert.ExtKeyUsage {
+		if eku == x509.ExtKeyUsageOCSPSigning {
+			return true
+		}
+	}
+	return false
+}
+
 // interpret traduz a resposta OCSP em Status, checando a janela de validade.
-func interpret(resp *ocsp.Response, now time.Time) (Status, error) {
-	if !resp.ThisUpdate.IsZero() && resp.ThisUpdate.Add(-clockSkew).After(now) {
+// Quando a resposta não traz nextUpdate, exige que thisUpdate esteja dentro de maxAge —
+// senão uma resposta Good antiga valeria para sempre (fail-closed).
+func interpret(resp *ocsp.Response, now time.Time, maxAge time.Duration) (Status, error) {
+	if resp.ThisUpdate.IsZero() {
+		return StatusUnknown, errors.New("resposta OCSP sem thisUpdate")
+	}
+	if resp.ThisUpdate.Add(-clockSkew).After(now) {
 		return StatusUnknown, errors.New("resposta OCSP ainda não é válida (thisUpdate no futuro)")
 	}
-	if !resp.NextUpdate.IsZero() && resp.NextUpdate.Add(clockSkew).Before(now) {
-		return StatusUnknown, errors.New("resposta OCSP vencida (passou do nextUpdate)")
+	if !resp.NextUpdate.IsZero() {
+		if resp.NextUpdate.Add(clockSkew).Before(now) {
+			return StatusUnknown, errors.New("resposta OCSP vencida (passou do nextUpdate)")
+		}
+	} else if resp.ThisUpdate.Add(maxAge).Before(now) {
+		return StatusUnknown, errors.New("resposta OCSP sem nextUpdate e mais velha que a idade máxima")
 	}
 	switch resp.Status {
 	case ocsp.Good:
@@ -212,11 +253,16 @@ func interpret(resp *ocsp.Response, now time.Time) (Status, error) {
 	}
 }
 
-// cacheExpiry define até quando cachear: nunca além do nextUpdate, nem além do teto.
-func cacheExpiry(resp *ocsp.Response, now time.Time, cap time.Duration) time.Time {
+// cacheExpiry define até quando cachear: nunca além do nextUpdate (ou, sem ele, de
+// thisUpdate+maxAge), nem além do teto.
+func cacheExpiry(resp *ocsp.Response, now time.Time, cap, maxAge time.Duration) time.Time {
 	exp := now.Add(cap)
-	if !resp.NextUpdate.IsZero() && resp.NextUpdate.Before(exp) {
-		exp = resp.NextUpdate
+	bound := resp.NextUpdate
+	if bound.IsZero() {
+		bound = resp.ThisUpdate.Add(maxAge)
+	}
+	if !bound.IsZero() && bound.Before(exp) {
+		exp = bound
 	}
 	return exp
 }

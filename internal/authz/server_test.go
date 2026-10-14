@@ -78,6 +78,18 @@ func TestDecide_GoodAllowsAndSetsHeader(t *testing.T) {
 	}
 }
 
+func TestDecide_EmptyHeaderNoInjection(t *testing.T) {
+	ca, leaf := testCAandLeaf(t)
+	s := NewServer(Config{Issuer: ca, Checker: fakeChecker{status: ocsp.StatusGood}, HeaderName: ""})
+	resp, _ := s.Check(context.Background(), checkReq(xfccFor(leaf)))
+	if resp.GetStatus().GetCode() != int32(codes.OK) {
+		t.Fatalf("esperava OK, veio %d", resp.GetStatus().GetCode())
+	}
+	if h := resp.GetOkResponse().GetHeaders(); len(h) != 0 {
+		t.Fatalf("header vazio devia significar sem injeção, veio %v", h)
+	}
+}
+
 func TestDecide_RevokedDenies(t *testing.T) {
 	ca, leaf := testCAandLeaf(t)
 	s := NewServer(Config{Issuer: ca, Checker: fakeChecker{status: ocsp.StatusRevoked}})

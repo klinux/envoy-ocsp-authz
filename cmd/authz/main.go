@@ -63,6 +63,7 @@ func run() error {
 	verifier := ocsp.New(
 		ocsp.WithHTTPClient(httpClient),
 		ocsp.WithCacheTTLCap(envDuration("OCSP_CACHE_TTL_CAP", 10*time.Minute)),
+		ocsp.WithMaxResponseAge(envDuration("OCSP_MAX_RESPONSE_AGE", 24*time.Hour)),
 		ocsp.WithAllowedResponderHosts(csv(env("OCSP_ALLOWED_HOSTS", ""))),
 	)
 
@@ -137,6 +138,9 @@ func ocspHTTPClient(caFile string, timeout time.Duration) (*http.Client, error) 
 	return &http.Client{
 		Timeout:   timeout,
 		Transport: &http.Transport{TLSClientConfig: tlsCfg},
+		// Não seguir redirects: um responder permitido não pode redirecionar para um
+		// host interno e furar o allowlist (anti-SSRF).
+		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 	}, nil
 }
 

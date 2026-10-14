@@ -46,12 +46,23 @@ All configuration is via environment variables:
 | `FORWARD_CERT_HEADER` | *(empty)* | Header to carry the verified cert upstream (URL-encoded PEM). Empty = allow/deny only |
 | `OCSP_TIMEOUT` | `5s` | Per-request timeout to the OCSP responder |
 | `OCSP_CACHE_TTL_CAP` | `10m` | Cache cap; never cached beyond `nextUpdate` |
+| `OCSP_MAX_RESPONSE_AGE` | `24h` | Max age of a response that carries **no** `nextUpdate` (older than this → rejected, fail-closed) |
 | `OCSP_ALLOWED_HOSTS` | *(empty)* | Comma-separated allowlist of responder hosts (anti-SSRF). Empty = no restriction |
 | `OCSP_CA_FILE` | *(system roots)* | CA bundle to trust for the responder's TLS (e.g. an internal PKI) |
 
-> **Security:** the OCSP URL comes from the certificate's AIA. Even though the issuer is
-> validated, set `OCSP_ALLOWED_HOSTS` to the responder host(s) you expect, so an
-> unexpected AIA cannot become an SSRF vector.
+> **Security notes:**
+> - The OCSP URL comes from the certificate's AIA. Even though the issuer is validated,
+>   set `OCSP_ALLOWED_HOSTS` to the responder host(s) you expect, so an unexpected AIA
+>   cannot become an SSRF vector. HTTP redirects from the responder are **not** followed.
+> - A delegated OCSP responder certificate is only trusted if it carries the
+>   `id-kp-OCSPSigning` EKU (so a plain client certificate cannot sign OCSP responses).
+> - Responses with no `nextUpdate` are bounded by `OCSP_MAX_RESPONSE_AGE`; responses with
+>   no `thisUpdate` are rejected.
+>
+> **ext_authz timeout:** Envoy's default ext_authz timeout is **200 ms**. Set the
+> gateway's request timeout for this service **above** `OCSP_TIMEOUT`, or a cache miss
+> (DNS + TLS + responder round-trip) is cut off before the OCSP check completes. See the
+> `requestTimeout` in [`deploy/kgateway/gateway-extension.yaml`](deploy/kgateway/gateway-extension.yaml).
 
 ## Metrics
 

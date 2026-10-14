@@ -1,4 +1,9 @@
 # Liga o ext_authz ao kgateway. failOpen=false => se o serviço cair, a requisição é negada.
+#
+# requestTimeout é essencial: o default do Envoy para ext_authz é 200ms, mas um cache miss
+# de OCSP (DNS + TLS + ida ao responder) passa disso e seria negado antes de responder.
+# Deixe-o MAIOR que o OCSP_TIMEOUT do serviço, para o serviço responder deny/allow em vez
+# de o Envoy estourar o timeout (com failOpen=false, timeout do Envoy também nega).
 apiVersion: gateway.kgateway.dev/v1alpha1
 kind: GatewayExtension
 metadata:
@@ -9,6 +14,7 @@ spec:
   extAuth:
     failOpen: false
     grpcService:
+      requestTimeout: 6s        # > OCSP_TIMEOUT (default 5s) do serviço
       backendRef:
         name: envoy-ocsp-authz
         port: 9191

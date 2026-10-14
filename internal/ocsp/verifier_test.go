@@ -24,6 +24,10 @@ type testPKI struct {
 	status   int       // xocsp.Good / Revoked / Unknown a devolver
 	thisUpd  time.Time // janela da resposta
 	nextUpd  time.Time
+	omitNext bool // se true, devolve resposta SEM nextUpdate
+	// Responder delegado opcional: se definido, a resposta é assinada por ele (e embutido).
+	respCert *x509.Certificate
+	respKey  *rsa.PrivateKey
 }
 
 func newTestPKI(t *testing.T) *testPKI {
@@ -55,7 +59,7 @@ func newTestPKI(t *testing.T) *testPKI {
 			this = time.Now().Add(-time.Minute)
 		}
 		next := p.nextUpd
-		if next.IsZero() {
+		if next.IsZero() && !p.omitNext {
 			next = time.Now().Add(time.Hour)
 		}
 		tmpl := xocsp.Response{
@@ -68,7 +72,14 @@ func newTestPKI(t *testing.T) *testPKI {
 			tmpl.RevokedAt = time.Now().Add(-time.Hour)
 			tmpl.RevocationReason = xocsp.Unspecified
 		}
-		resp, err := xocsp.CreateResponse(caCert, caCert, tmpl, caKey)
+		if p.respCert != nil {
+			tmpl.Certificate = p.respCert // embute o responder delegado para o parser verificar
+		}
+		signerCert, signerKey := caCert, caKey
+		if p.respCert != nil {
+			signerCert, signerKey = p.respCert, p.respKey
+		}
+		resp, err := xocsp.CreateResponse(caCert, signerCert, tmpl, signerKey)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
@@ -163,6 +174,86 @@ func TestCheck_CacheHitAvoidsSecondCall(t *testing.T) {
 	}
 	if calls != 1 {
 		t.Fatalf("esperava 1 chamada ao responder (cache), veio %d", calls)
+	}
+}
+
+// issueResponder emite um cert assinado pela CA com os EKUs dados (responder delegado).
+func (p *testPKI) issueResponder(t *testing.T, ekus []x509.ExtKeyUsage) (*x509.Certificate, *rsa.PrivateKey) {
+	t.Helper()
+	key, _ := rsa.GenerateKey(rand.Reader, 2048)
+	tmpl := &x509.Certificate{
+		SerialNumber: big.NewInt(time.Now().UnixNano()),
+		Subject:      pkix.Name{CommonName: "responder"},
+		NotBefore:    time.Now().Add(-time.Minute),
+		NotAfter:     time.Now().Add(time.Hour),
+		KeyUsage:     x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:  ekus,
+	}
+	der, _ := x509.CreateCertificate(rand.Reader, tmpl, p.caCert, &key.PublicKey, p.caKey)
+	c, _ := x509.ParseCertificate(der)
+	return c, key
+}
+
+// Fix 1: um responder delegado SEM id-kp-OCSPSigning (ex.: só ClientAuth) deve ser recusado,
+// senão qualquer cert emitido pela CA poderia assinar respostas OCSP.
+func TestCheck_DelegatedResponderWithoutOCSPSigningRejected(t *testing.T) {
+	p := newTestPKI(t)
+	p.status = xocsp.Good
+	p.respCert, p.respKey = p.issueResponder(t, []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth})
+	v := New(WithHTTPClient(p.server.Client()))
+	if _, err := v.Check(context.Background(), p.leaf(t), p.caCert); err == nil {
+		t.Fatal("responder sem EKU OCSPSigning devia ser recusado")
+	}
+}
+
+func TestCheck_DelegatedResponderWithOCSPSigningAccepted(t *testing.T) {
+	p := newTestPKI(t)
+	p.status = xocsp.Good
+	p.respCert, p.respKey = p.issueResponder(t, []x509.ExtKeyUsage{x509.ExtKeyUsageOCSPSigning})
+	v := New(WithHTTPClient(p.server.Client()))
+	st, err := v.Check(context.Background(), p.leaf(t), p.caCert)
+	if err != nil || st != StatusGood {
+		t.Fatalf("responder delegado válido devia dar good: %v err=%v", st, err)
+	}
+}
+
+// Fix 2: resposta Good antiga SEM nextUpdate não pode valer para sempre.
+func TestCheck_NoNextUpdateStaleRejected(t *testing.T) {
+	p := newTestPKI(t)
+	p.status = xocsp.Good
+	p.thisUpd = time.Now().Add(-48 * time.Hour)
+	p.omitNext = true // sem nextUpdate
+	v := New(WithHTTPClient(p.server.Client()), WithMaxResponseAge(24*time.Hour))
+	if _, err := v.Check(context.Background(), p.leaf(t), p.caCert); err == nil {
+		t.Fatal("resposta velha sem nextUpdate devia ser recusada")
+	}
+}
+
+func TestCheck_NoNextUpdateFreshAccepted(t *testing.T) {
+	p := newTestPKI(t)
+	p.status = xocsp.Good
+	p.thisUpd = time.Now().Add(-time.Minute)
+	p.omitNext = true
+	v := New(WithHTTPClient(p.server.Client()), WithMaxResponseAge(24*time.Hour))
+	if st, err := v.Check(context.Background(), p.leaf(t), p.caCert); err != nil || st != StatusGood {
+		t.Fatalf("resposta recente sem nextUpdate devia dar good: %v err=%v", st, err)
+	}
+}
+
+// Fix 6: o client default não segue redirects (um responder permitido não pode
+// redirecionar para um host interno).
+func TestCheck_RedirectNotFollowed(t *testing.T) {
+	p := newTestPKI(t)
+	p.status = xocsp.Good
+	redir := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, p.server.URL, http.StatusFound)
+	}))
+	defer redir.Close()
+	leaf := p.leaf(t)
+	leaf.OCSPServer = []string{redir.URL}
+	v := New() // client default (noRedirectClient)
+	if _, err := v.Check(context.Background(), leaf, p.caCert); err == nil {
+		t.Fatal("redirect do responder não devia ser seguido")
 	}
 }
 
