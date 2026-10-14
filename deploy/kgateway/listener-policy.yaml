@@ -2,6 +2,10 @@
 # descartando qualquer XFCC que o cliente mande (SanitizeSet). Sem isso, o cliente poderia
 # forjar o header que o ext_authz vai ler.
 #
+# IMPORTANTE: para o clientCertificateValidation (mTLS) ser aplicado ao listener, o targetRef
+# precisa apontar o listener específico via `sectionName`. Sem o sectionName, o kgateway aceita
+# a policy mas NÃO configura require_client_certificate no Envoy (o mTLS não é exigido).
+#
 # Estrutura do kgateway v2.4.x:
 #   - clientCertificateValidation fica em spec.default (nível do listener);
 #   - forwardClientCertDetails fica em spec.default.httpSettings (config do HCM).
@@ -15,6 +19,7 @@ spec:
     - group: gateway.networking.k8s.io
       kind: Gateway
       name: my-mtls-gateway
+      sectionName: https     # nome do listener mTLS — obrigatório para o mTLS valer
   default:
     clientCertificateValidation:
       mode: Require

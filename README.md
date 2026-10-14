@@ -107,9 +107,11 @@ spec:
       name: ocsp-authz
 ```
 
-The gateway listener must forward the client cert in XFCC. With kgateway, set
-`forwardClientCertDetails` to `SanitizeSet` with `cert` details on the `ListenerPolicy`
-so Envoy ignores any client-supplied XFCC and writes only the handshake certificate.
+The gateway listener must require mTLS and forward the client cert in XFCC. With kgateway,
+the `ListenerPolicy` must target the listener via `sectionName` for
+`clientCertificateValidation` (mTLS) to take effect, and set `forwardClientCertDetails` to
+`SanitizeSet` with `cert` details so Envoy ignores any client-supplied XFCC and writes only
+the handshake certificate.
 
 See [`deploy/`](deploy/) for complete, runnable examples.
 
