@@ -58,6 +58,7 @@ type Verifier struct {
 	cacheCap     time.Duration // teto do TTL de cache, independente do nextUpdate
 	maxAge       time.Duration // idade máxima tolerada de uma resposta sem nextUpdate
 	allowedHosts []string      // se não vazio, só consulta responders nesses hosts (anti-SSRF)
+	responderURL string        // se setado, ignora a AIA do cert e consulta sempre este responder
 	now          func() time.Time
 }
 
@@ -92,6 +93,16 @@ func WithClock(f func() time.Time) Option { return func(v *Verifier) { v.now = f
 // limitar os hosts evita que uma AIA inesperada vire um vetor de SSRF. Vazio = sem restrição.
 func WithAllowedResponderHosts(hosts []string) Option {
 	return func(v *Verifier) { v.allowedHosts = hosts }
+}
+
+// WithResponderURL sobrescreve a URL do responder OCSP: quando setada, o verifier ignora a
+// AIA do certificado e consulta sempre este endpoint (equivale ao `ssl_ocsp_responder` do
+// nginx). Útil quando os certs não trazem AIA, ou para forçar um responder específico — por
+// exemplo o OCSP nativo do Vault no nó ativo
+// (http://vault-active.vault.svc.cluster.local:8200/v1/<pki>/ocsp). Com a URL setada, o
+// allowlist de hosts não se aplica (o endpoint é configuração confiável, não vem do cert).
+func WithResponderURL(rawURL string) Option {
+	return func(v *Verifier) { v.responderURL = strings.TrimSpace(rawURL) }
 }
 
 // hostAllowed verifica a URL contra o allowlist (match exato ou subdomínio).
@@ -145,7 +156,13 @@ func (v *Verifier) Check(ctx context.Context, cert, issuer *x509.Certificate) (S
 		return hit, nil
 	}
 
+	// responderURL (quando setado) sobrescreve a AIA do cert — equivale ao `ssl_ocsp_responder`
+	// do nginx: ignora a AIA e consulta sempre este endpoint fixo (ex.: o OCSP do Vault no nó
+	// ativo). Útil quando os certs não trazem AIA ou para forçar o nó ativo.
 	servers := cert.OCSPServer
+	if v.responderURL != "" {
+		servers = []string{v.responderURL}
+	}
 	if len(servers) == 0 {
 		return StatusUnknown, ErrNoResponder
 	}
@@ -158,7 +175,9 @@ func (v *Verifier) Check(ctx context.Context, cert, issuer *x509.Certificate) (S
 	// Tenta cada responder da AIA, em ordem; o primeiro que der resposta conclusiva vence.
 	var lastErr error
 	for _, url := range servers {
-		if !v.hostAllowed(url) {
+		// O allowlist protege contra AIA inesperada (SSRF). Um responderURL configurado é
+		// confiança explícita, então não passa pelo allowlist.
+		if v.responderURL == "" && !v.hostAllowed(url) {
 			lastErr = fmt.Errorf("responder %s fora do allowlist", url)
 			continue
 		}

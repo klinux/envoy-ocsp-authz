@@ -14,6 +14,8 @@
 //	OCSP_CACHE_TTL_CAP        teto do cache; nunca além do nextUpdate (default 10m)
 //	OCSP_ALLOWED_HOSTS        hosts permitidos do responder, separados por vírgula (anti-SSRF)
 //	OCSP_CA_FILE              CA bundle para validar o TLS do responder (default: roots do sistema)
+//	OCSP_RESPONDER_URL        se setado, ignora a AIA do cert e usa este responder fixo
+//	                          (equivale ao ssl_ocsp_responder do nginx; ex.: o OCSP do Vault ativo)
 package main
 
 import (
@@ -65,6 +67,7 @@ func run() error {
 		ocsp.WithCacheTTLCap(envDuration("OCSP_CACHE_TTL_CAP", 10*time.Minute)),
 		ocsp.WithMaxResponseAge(envDuration("OCSP_MAX_RESPONSE_AGE", 24*time.Hour)),
 		ocsp.WithAllowedResponderHosts(csv(env("OCSP_ALLOWED_HOSTS", ""))),
+		ocsp.WithResponderURL(env("OCSP_RESPONDER_URL", "")),
 	)
 
 	reg := prometheus.NewRegistry()
