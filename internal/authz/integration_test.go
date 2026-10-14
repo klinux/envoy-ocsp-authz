@@ -79,7 +79,7 @@ func (v *vaultClient) do(t *testing.T, method, path, body string) map[string]any
 // issue devolve o PEM do cert, o serial, e o cert parseado.
 func (v *vaultClient) issue(t *testing.T, cn string) (string, string, *x509.Certificate) {
 	t.Helper()
-	out := v.do(t, "POST", "issue/"+v.role, `{"common_name":"`+cn+`","ttl":"20m"}`)
+	out := v.do(t, "POST", v.pki+"/issue/"+v.role, `{"common_name":"`+cn+`","ttl":"20m"}`)
 	data := out["data"].(map[string]any)
 	certPEM := data["certificate"].(string)
 	serial := data["serial_number"].(string)
@@ -93,7 +93,7 @@ func (v *vaultClient) issue(t *testing.T, cn string) (string, string, *x509.Cert
 
 func (v *vaultClient) revoke(t *testing.T, serial string) {
 	t.Helper()
-	v.do(t, "POST", "revoke", `{"serial_number":"`+serial+`"}`)
+	v.do(t, "POST", v.pki+"/revoke", `{"serial_number":"`+serial+`"}`)
 }
 
 func (v *vaultClient) issuerCA(t *testing.T) *x509.Certificate {
