@@ -1,5 +1,13 @@
 # Changelog
 
+## v0.2.0
+
+- Add `OCSP_RESPONDER_URL`: override the responder so the service ignores the certificate's
+  AIA and always queries a fixed endpoint — the equivalent of nginx's `ssl_ocsp_responder`.
+  Useful when client certificates carry no AIA, or to force a specific responder such as a
+  Vault active-node OCSP endpoint. When set, the host allowlist does not apply (the URL is
+  trusted config, not taken from the certificate).
+
 ## v0.1.0 — first release
 
 Envoy `ext_authz` (gRPC) service that performs OCSP revocation checking of the mTLS client

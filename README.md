@@ -51,6 +51,7 @@ All configuration is via environment variables:
 | `OCSP_MAX_RESPONSE_AGE` | `24h` | Max age of a response that carries **no** `nextUpdate` (older than this → rejected, fail-closed) |
 | `OCSP_ALLOWED_HOSTS` | *(empty)* | Comma-separated allowlist of responder hosts (anti-SSRF). Empty = no restriction |
 | `OCSP_CA_FILE` | *(system roots)* | CA bundle to trust for the responder's TLS (e.g. an internal PKI) |
+| `OCSP_RESPONDER_URL` | *(empty)* | Override the responder: ignore the certificate's AIA and always query this URL (like nginx's `ssl_ocsp_responder`). Use it to force a fixed responder — e.g. a Vault active-node OCSP endpoint — or when the client certificates carry no AIA. When set, the host allowlist does not apply (the URL is trusted config, not taken from the cert). |
 
 > **Security notes:**
 > - The OCSP URL comes from the certificate's AIA. Even though the issuer is validated,

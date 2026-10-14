@@ -257,4 +257,29 @@ func TestCheck_RedirectNotFollowed(t *testing.T) {
 	}
 }
 
+// WithResponderURL deve ignorar a AIA do cert (inclusive quando ausente) e furar o allowlist,
+// espelhando o ssl_ocsp_responder do nginx (responder fixo, ex.: Vault ativo).
+func TestCheck_ResponderURLOverridesAIA(t *testing.T) {
+	p := newTestPKI(t)
+	p.status = xocsp.Good
+	leaf := p.leaf(t)
+	leaf.OCSPServer = nil // cert sem AIA
+
+	// sem override: sem AIA => falha fechado.
+	if _, err := New(WithHTTPClient(p.server.Client())).Check(context.Background(), leaf, p.caCert); err == nil {
+		t.Fatal("sem AIA e sem override devia falhar")
+	}
+
+	// com override: usa o endpoint fixo e dá Good, mesmo sem AIA e com allowlist restrito a outro host.
+	v := New(
+		WithHTTPClient(p.server.Client()),
+		WithResponderURL(p.server.URL),
+		WithAllowedResponderHosts([]string{"nada.example.com"}),
+	)
+	st, err := v.Check(context.Background(), leaf, p.caCert)
+	if err != nil || st != StatusGood {
+		t.Fatalf("override devia dar good ignorando AIA/allowlist: %v err=%v", st, err)
+	}
+}
+
 var _ = crypto.SHA1 // evita import não usado se o default mudar
