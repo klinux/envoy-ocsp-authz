@@ -1,5 +1,7 @@
 # envoy-ocsp-authz
 
+![ci](https://github.com/klinux/envoy-ocsp-authz/actions/workflows/ci.yml/badge.svg) ![release](https://github.com/klinux/envoy-ocsp-authz/actions/workflows/release.yml/badge.svg)
+
 An [Envoy external authorization](https://www.envoyproxy.io/docs/envoy/latest/configuration/http/http_filters/ext_authz_filter)
 (`ext_authz`) gRPC service that performs **OCSP revocation checking of the client
 certificate** of an mTLS connection — the one thing Envoy itself does not do.
