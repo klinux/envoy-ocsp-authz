@@ -1,0 +1,54 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: envoy-ocsp-authz
+  labels: { app: envoy-ocsp-authz }
+spec:
+  replicas: 2
+  selector:
+    matchLabels: { app: envoy-ocsp-authz }
+  template:
+    metadata:
+      labels: { app: envoy-ocsp-authz }
+    spec:
+      serviceAccountName: envoy-ocsp-authz
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile: { type: RuntimeDefault }
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels: { app: envoy-ocsp-authz }
+      containers:
+        - name: authz
+          image: envoy-ocsp-authz:dev   # overlay define a imagem real
+          args: []
+          env:
+            - { name: LISTEN_ADDR, value: ":9191" }
+            - { name: METRICS_ADDR, value: ":9192" }
+            - { name: ISSUER_CA_FILE, value: "/etc/pki/issuer-ca.pem" }
+            # FORWARD_CERT_HEADER, OCSP_ALLOWED_HOSTS, OCSP_CA_FILE: definidos no overlay.
+          ports:
+            - { name: grpc, containerPort: 9191 }
+            - { name: http, containerPort: 9192 }
+          readinessProbe:
+            httpGet: { path: /healthz, port: http }
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: { path: /healthz, port: http }
+            periodSeconds: 20
+          resources:
+            requests: { cpu: 50m, memory: 64Mi }
+            limits: { memory: 128Mi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ["ALL"] }
+          volumeMounts:
+            - { name: issuer-ca, mountPath: /etc/pki, readOnly: true }
+      volumes:
+        - name: issuer-ca
+          secret:
+            secretName: envoy-ocsp-authz-issuer-ca   # chave: issuer-ca.pem

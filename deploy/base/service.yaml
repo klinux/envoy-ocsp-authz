@@ -1,0 +1,10 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: envoy-ocsp-authz
+  labels: { app: envoy-ocsp-authz }
+spec:
+  selector: { app: envoy-ocsp-authz }
+  ports:
+    - { name: grpc, port: 9191, targetPort: grpc, appProtocol: grpc }
+    - { name: http, port: 9192, targetPort: http }

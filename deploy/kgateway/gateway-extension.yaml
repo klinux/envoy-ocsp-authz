@@ -1,0 +1,14 @@
+# Liga o ext_authz ao kgateway. failOpen=false => se o serviço cair, a requisição é negada.
+apiVersion: gateway.kgateway.dev/v1alpha1
+kind: GatewayExtension
+metadata:
+  name: ocsp-authz
+  namespace: kgateway-system
+spec:
+  type: ExtAuth
+  extAuth:
+    failOpen: false
+    grpcService:
+      backendRef:
+        name: envoy-ocsp-authz
+        port: 9191
