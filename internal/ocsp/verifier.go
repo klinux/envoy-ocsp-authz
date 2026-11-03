@@ -225,12 +225,24 @@ func (v *Verifier) query(ctx context.Context, url string, reqDER []byte, cert, i
 	if err != nil {
 		return nil, fmt.Errorf("resposta OCSP inválida de %s: %w", url, err)
 	}
-	// x/crypto/ocsp valida a assinatura, mas NÃO checa o EKU do responder delegado.
-	// Se a resposta foi assinada por um cert embutido (não a própria CA), ele precisa
-	// carregar id-kp-OCSPSigning — senão qualquer cert emitido pela CA (ex.: um cert de
-	// cliente) poderia assinar respostas OCSP. Fail-closed.
-	if resp.Certificate != nil && !hasOCSPSigningEKU(resp.Certificate) {
-		return nil, fmt.Errorf("responder delegado de %s sem EKU id-kp-OCSPSigning", url)
+	// x/crypto/ocsp valida a assinatura e que o responder delegado foi assinado pelo issuer,
+	// mas NÃO checa o EKU nem a validade temporal desse cert embutido. Confere ambos aqui.
+	if resp.Certificate != nil {
+		// EKU id-kp-OCSPSigning: sem isto, qualquer cert emitido pela CA (ex.: um cert de
+		// cliente) poderia assinar respostas OCSP. Fail-closed.
+		if !hasOCSPSigningEKU(resp.Certificate) {
+			return nil, fmt.Errorf("responder delegado de %s sem EKU id-kp-OCSPSigning", url)
+		}
+		// Validade temporal (mesma tolerância de clock da janela da resposta). Sem isto, um
+		// responder EXPIRADO seria aceito: quem tivesse a chave antiga do responder e
+		// controlasse/interceptasse o endpoint poderia forjar "Good" para um cert revogado.
+		now := v.now()
+		if now.Add(clockSkew).Before(resp.Certificate.NotBefore) {
+			return nil, fmt.Errorf("responder delegado de %s ainda não válido (NotBefore %s)", url, resp.Certificate.NotBefore.UTC().Format(time.RFC3339))
+		}
+		if now.Add(-clockSkew).After(resp.Certificate.NotAfter) {
+			return nil, fmt.Errorf("responder delegado de %s expirado (NotAfter %s)", url, resp.Certificate.NotAfter.UTC().Format(time.RFC3339))
+		}
 	}
 	return resp, nil
 }

@@ -177,15 +177,21 @@ func TestCheck_CacheHitAvoidsSecondCall(t *testing.T) {
 	}
 }
 
-// issueResponder emite um cert assinado pela CA com os EKUs dados (responder delegado).
+// issueResponder emite um cert assinado pela CA com os EKUs dados (responder delegado),
+// válido agora (NotBefore -1min / NotAfter +1h).
 func (p *testPKI) issueResponder(t *testing.T, ekus []x509.ExtKeyUsage) (*x509.Certificate, *rsa.PrivateKey) {
+	return p.issueResponderValidity(t, ekus, time.Now().Add(-time.Minute), time.Now().Add(time.Hour))
+}
+
+// issueResponderValidity é como issueResponder mas com a janela de validade explícita.
+func (p *testPKI) issueResponderValidity(t *testing.T, ekus []x509.ExtKeyUsage, notBefore, notAfter time.Time) (*x509.Certificate, *rsa.PrivateKey) {
 	t.Helper()
 	key, _ := rsa.GenerateKey(rand.Reader, 2048)
 	tmpl := &x509.Certificate{
 		SerialNumber: big.NewInt(time.Now().UnixNano()),
 		Subject:      pkix.Name{CommonName: "responder"},
-		NotBefore:    time.Now().Add(-time.Minute),
-		NotAfter:     time.Now().Add(time.Hour),
+		NotBefore:    notBefore,
+		NotAfter:     notAfter,
 		KeyUsage:     x509.KeyUsageDigitalSignature,
 		ExtKeyUsage:  ekus,
 	}
@@ -214,6 +220,34 @@ func TestCheck_DelegatedResponderWithOCSPSigningAccepted(t *testing.T) {
 	st, err := v.Check(context.Background(), p.leaf(t), p.caCert)
 	if err != nil || st != StatusGood {
 		t.Fatalf("responder delegado válido devia dar good: %v err=%v", st, err)
+	}
+}
+
+// HIGH: um responder delegado EXPIRADO deve ser recusado (fail-closed). Senão, quem
+// tivesse a chave antiga do responder e controlasse/interceptasse o endpoint poderia
+// forjar "Good" para um certificado revogado.
+func TestCheck_DelegatedResponderExpiredRejected(t *testing.T) {
+	p := newTestPKI(t)
+	p.status = xocsp.Good
+	p.respCert, p.respKey = p.issueResponderValidity(t,
+		[]x509.ExtKeyUsage{x509.ExtKeyUsageOCSPSigning},
+		time.Now().Add(-48*time.Hour), time.Now().Add(-24*time.Hour))
+	v := New(WithHTTPClient(p.server.Client()))
+	if _, err := v.Check(context.Background(), p.leaf(t), p.caCert); err == nil {
+		t.Fatal("responder delegado expirado devia ser recusado")
+	}
+}
+
+// Simétrico: responder delegado ainda-não-válido (NotBefore no futuro) também é recusado.
+func TestCheck_DelegatedResponderNotYetValidRejected(t *testing.T) {
+	p := newTestPKI(t)
+	p.status = xocsp.Good
+	p.respCert, p.respKey = p.issueResponderValidity(t,
+		[]x509.ExtKeyUsage{x509.ExtKeyUsageOCSPSigning},
+		time.Now().Add(24*time.Hour), time.Now().Add(48*time.Hour))
+	v := New(WithHTTPClient(p.server.Client()))
+	if _, err := v.Check(context.Background(), p.leaf(t), p.caCert); err == nil {
+		t.Fatal("responder delegado ainda-não-válido devia ser recusado")
 	}
 }
 
