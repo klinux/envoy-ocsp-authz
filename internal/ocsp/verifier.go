@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"golang.org/x/crypto/ocsp"
+	"golang.org/x/sync/singleflight"
 )
 
 // Status é o resultado de uma checagem de revogação.
@@ -60,6 +61,7 @@ type Verifier struct {
 	allowedHosts []string      // se não vazio, só consulta responders nesses hosts (anti-SSRF)
 	responderURL string        // se setado, ignora a AIA do cert e consulta sempre este responder
 	now          func() time.Time
+	sf           singleflight.Group // coalesce consultas concorrentes ao mesmo cert em cache frio
 }
 
 // Option configura o Verifier.
@@ -152,10 +154,29 @@ func (v *Verifier) Check(ctx context.Context, cert, issuer *x509.Certificate) (S
 	if cert == nil || issuer == nil {
 		return StatusUnknown, errors.New("cert ou issuer nulo")
 	}
-	if hit, ok := v.cache.get(cacheKey(cert, issuer), v.now()); ok {
+	key := cacheKey(cert, issuer)
+	if hit, ok := v.cache.get(key, v.now()); ok {
 		return hit, nil
 	}
 
+	// singleflight: requisições concorrentes para o MESMO cert em cache frio coalescem numa
+	// única consulta ao responder (evita a tempestade de N chamadas OCSP idênticas sob carga).
+	res, err, _ := v.sf.Do(key, func() (interface{}, error) {
+		// Outra flight pode ter preenchido o cache enquanto esperávamos a vez.
+		if hit, ok := v.cache.get(key, v.now()); ok {
+			return hit, nil
+		}
+		return v.lookup(ctx, cert, issuer, key)
+	})
+	if err != nil {
+		return StatusUnknown, err
+	}
+	return res.(Status), nil
+}
+
+// lookup consulta o(s) responder(es) OCSP (sem cache) e cacheia o resultado conclusivo.
+// É o corpo do cache-miss, chamado dentro do singleflight.
+func (v *Verifier) lookup(ctx context.Context, cert, issuer *x509.Certificate, key string) (Status, error) {
 	// responderURL (quando setado) sobrescreve a AIA do cert — equivale ao `ssl_ocsp_responder`
 	// do nginx: ignora a AIA e consulta sempre este endpoint fixo (ex.: o OCSP do Vault no nó
 	// ativo). Útil quando os certs não trazem AIA ou para forçar o nó ativo.
@@ -191,7 +212,7 @@ func (v *Verifier) Check(ctx context.Context, cert, issuer *x509.Certificate) (S
 			lastErr = err
 			continue
 		}
-		v.cache.put(cacheKey(cert, issuer), status, cacheExpiry(resp, v.now(), v.cacheCap, v.maxAge))
+		v.cache.put(key, status, cacheExpiry(resp, v.now(), v.cacheCap, v.maxAge))
 		return status, nil
 	}
 	return StatusUnknown, fmt.Errorf("todos os responders OCSP falharam: %w", lastErr)

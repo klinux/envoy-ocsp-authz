@@ -10,6 +10,8 @@ import (
 	"math/big"
 	"net/http"
 	"net/http/httptest"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -174,6 +176,39 @@ func TestCheck_CacheHitAvoidsSecondCall(t *testing.T) {
 	}
 	if calls != 1 {
 		t.Fatalf("esperava 1 chamada ao responder (cache), veio %d", calls)
+	}
+}
+
+// Sob carga, N requisições concorrentes para o mesmo cert em cache frio devem coalescer
+// numa única consulta ao responder (singleflight), não N chamadas OCSP idênticas.
+func TestCheck_ConcurrentColdCacheCoalesced(t *testing.T) {
+	p := newTestPKI(t)
+	var calls int32
+	wrapped := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&calls, 1)
+		time.Sleep(50 * time.Millisecond) // segura a flight p/ as goroutines concorrentes empilharem
+		p.server.Config.Handler.ServeHTTP(w, r)
+	})
+	ts := httptest.NewServer(wrapped)
+	defer ts.Close()
+	v := New(WithHTTPClient(ts.Client()))
+	leaf := p.leaf(t)
+	leaf.OCSPServer = []string{ts.URL}
+
+	const n = 16
+	var wg sync.WaitGroup
+	wg.Add(n)
+	for i := 0; i < n; i++ {
+		go func() {
+			defer wg.Done()
+			if st, err := v.Check(context.Background(), leaf, p.caCert); err != nil || st != StatusGood {
+				t.Errorf("Check concorrente: st=%v err=%v", st, err)
+			}
+		}()
+	}
+	wg.Wait()
+	if got := atomic.LoadInt32(&calls); got != 1 {
+		t.Fatalf("esperava 1 chamada ao responder (coalescida), veio %d", got)
 	}
 }
 
