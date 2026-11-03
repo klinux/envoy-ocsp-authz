@@ -212,6 +212,88 @@ func TestCheck_ConcurrentColdCacheCoalesced(t *testing.T) {
 	}
 }
 
+// blockingResponder cria um responder que sinaliza quando o líder entrou na flight (entered)
+// e só responde quando release é fechado. Permite exercitar o cancelamento com a flight ativa.
+func (p *testPKI) blockingResponder(t *testing.T) (ts *httptest.Server, entered <-chan struct{}, release chan struct{}) {
+	t.Helper()
+	ent := make(chan struct{}, 1)
+	rel := make(chan struct{})
+	wrapped := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case ent <- struct{}{}:
+		default:
+		}
+		<-rel
+		p.server.Config.Handler.ServeHTTP(w, r)
+	})
+	ts = httptest.NewServer(wrapped)
+	t.Cleanup(ts.Close)
+	return ts, ent, rel
+}
+
+// Líder cancelado NÃO pode envenenar um waiter válido: a consulta compartilhada roda num
+// contexto desacoplado do líder, então o waiter ainda recebe Good.
+func TestCheck_LeaderCancelDoesNotPoisonWaiter(t *testing.T) {
+	p := newTestPKI(t)
+	ts, entered, release := p.blockingResponder(t)
+	v := New(WithHTTPClient(ts.Client()))
+	leaf := p.leaf(t)
+	leaf.OCSPServer = []string{ts.URL}
+
+	lctx, lcancel := context.WithCancel(context.Background())
+	go func() { _, _ = v.Check(lctx, leaf, p.caCert) }() // líder entra na flight
+	<-entered
+
+	type res struct {
+		st  Status
+		err error
+	}
+	wdone := make(chan res, 1)
+	go func() { st, err := v.Check(context.Background(), leaf, p.caCert); wdone <- res{st, err} }()
+	time.Sleep(30 * time.Millisecond) // deixa o waiter juntar na flight
+
+	lcancel()      // cancela o LÍDER
+	close(release) // libera a consulta compartilhada (independente do ctx do líder)
+
+	select {
+	case r := <-wdone:
+		if r.err != nil || r.st != StatusGood {
+			t.Fatalf("waiter válido deveria receber Good apesar do líder cancelado: st=%v err=%v", r.st, r.err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("waiter não recebeu resultado")
+	}
+}
+
+// Waiter cancelado desiste da PRÓPRIA espera imediatamente, sem ficar preso até a consulta
+// compartilhada (ainda bloqueada) terminar.
+func TestCheck_WaiterCancelReturnsPromptly(t *testing.T) {
+	p := newTestPKI(t)
+	ts, entered, release := p.blockingResponder(t)
+	defer close(release) // libera o líder ao final
+	v := New(WithHTTPClient(ts.Client()))
+	leaf := p.leaf(t)
+	leaf.OCSPServer = []string{ts.URL}
+
+	go func() { _, _ = v.Check(context.Background(), leaf, p.caCert) }() // líder preso no handler
+	<-entered
+
+	wctx, wcancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { _, err := v.Check(wctx, leaf, p.caCert); done <- err }()
+	time.Sleep(30 * time.Millisecond) // waiter juntou na flight
+	wcancel()
+
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("waiter cancelado deveria retornar erro de contexto")
+		}
+	case <-time.After(1 * time.Second):
+		t.Fatal("waiter cancelado ficou preso na flight (regressão)")
+	}
+}
+
 // issueResponder emite um cert assinado pela CA com os EKUs dados (responder delegado),
 // válido agora (NotBefore -1min / NotAfter +1h).
 func (p *testPKI) issueResponder(t *testing.T, ekus []x509.ExtKeyUsage) (*x509.Certificate, *rsa.PrivateKey) {

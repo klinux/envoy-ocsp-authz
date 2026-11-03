@@ -53,15 +53,16 @@ const clockSkew = 5 * time.Minute
 
 // Verifier faz a checagem OCSP, com cache e um teto para o corpo da resposta.
 type Verifier struct {
-	httpClient   *http.Client
-	cache        *cache
-	maxBodyBytes int64
-	cacheCap     time.Duration // teto do TTL de cache, independente do nextUpdate
-	maxAge       time.Duration // idade máxima tolerada de uma resposta sem nextUpdate
-	allowedHosts []string      // se não vazio, só consulta responders nesses hosts (anti-SSRF)
-	responderURL string        // se setado, ignora a AIA do cert e consulta sempre este responder
-	now          func() time.Time
-	sf           singleflight.Group // coalesce consultas concorrentes ao mesmo cert em cache frio
+	httpClient    *http.Client
+	cache         *cache
+	maxBodyBytes  int64
+	cacheCap      time.Duration // teto do TTL de cache, independente do nextUpdate
+	maxAge        time.Duration // idade máxima tolerada de uma resposta sem nextUpdate
+	allowedHosts  []string      // se não vazio, só consulta responders nesses hosts (anti-SSRF)
+	responderURL  string        // se setado, ignora a AIA do cert e consulta sempre este responder
+	now           func() time.Time
+	flightTimeout time.Duration      // teto da consulta compartilhada (singleflight), desacoplada do líder
+	sf            singleflight.Group // coalesce consultas concorrentes ao mesmo cert em cache frio
 }
 
 // Option configura o Verifier.
@@ -132,12 +133,13 @@ func (v *Verifier) hostAllowed(rawURL string) bool {
 // New cria um Verifier.
 func New(opts ...Option) *Verifier {
 	v := &Verifier{
-		httpClient:   noRedirectClient(5 * time.Second),
-		cache:        newCache(4096),
-		maxBodyBytes: 1 << 20, // 1 MiB; respostas OCSP são pequenas
-		cacheCap:     10 * time.Minute,
-		maxAge:       24 * time.Hour, // resposta sem nextUpdate só vale por este tempo após thisUpdate
-		now:          time.Now,
+		httpClient:    noRedirectClient(5 * time.Second),
+		cache:         newCache(4096),
+		maxBodyBytes:  1 << 20, // 1 MiB; respostas OCSP são pequenas
+		cacheCap:      10 * time.Minute,
+		maxAge:        24 * time.Hour, // resposta sem nextUpdate só vale por este tempo após thisUpdate
+		now:           time.Now,
+		flightTimeout: 30 * time.Second, // teto da consulta compartilhada (bem acima do timeout por-request)
 	}
 	for _, o := range opts {
 		o(v)
@@ -161,17 +163,28 @@ func (v *Verifier) Check(ctx context.Context, cert, issuer *x509.Certificate) (S
 
 	// singleflight: requisições concorrentes para o MESMO cert em cache frio coalescem numa
 	// única consulta ao responder (evita a tempestade de N chamadas OCSP idênticas sob carga).
-	res, err, _ := v.sf.Do(key, func() (interface{}, error) {
+	// DoChan + contexto compartilhado desacoplado do líder: cancelar um chamador (líder ou
+	// waiter) NÃO derruba a consulta compartilhada nem os outros waiters — cada um apenas
+	// desiste da PRÓPRIA espera via o seu ctx. Sem isso, um líder que expira negaria waiters
+	// válidos, e um waiter cancelado ficaria preso até a consulta compartilhada terminar.
+	ch := v.sf.DoChan(key, func() (interface{}, error) {
 		// Outra flight pode ter preenchido o cache enquanto esperávamos a vez.
 		if hit, ok := v.cache.get(key, v.now()); ok {
 			return hit, nil
 		}
-		return v.lookup(ctx, cert, issuer, key)
+		cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), v.flightTimeout)
+		defer cancel()
+		return v.lookup(cctx, cert, issuer, key)
 	})
-	if err != nil {
-		return StatusUnknown, err
+	select {
+	case <-ctx.Done():
+		return StatusUnknown, ctx.Err()
+	case r := <-ch:
+		if r.Err != nil {
+			return StatusUnknown, r.Err
+		}
+		return r.Val.(Status), nil
 	}
-	return res.(Status), nil
 }
 
 // lookup consulta o(s) responder(es) OCSP (sem cache) e cacheia o resultado conclusivo.
