@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"golang.org/x/crypto/ocsp"
+	"golang.org/x/sync/singleflight"
 )
 
 // Status é o resultado de uma checagem de revogação.
@@ -52,14 +53,16 @@ const clockSkew = 5 * time.Minute
 
 // Verifier faz a checagem OCSP, com cache e um teto para o corpo da resposta.
 type Verifier struct {
-	httpClient   *http.Client
-	cache        *cache
-	maxBodyBytes int64
-	cacheCap     time.Duration // teto do TTL de cache, independente do nextUpdate
-	maxAge       time.Duration // idade máxima tolerada de uma resposta sem nextUpdate
-	allowedHosts []string      // se não vazio, só consulta responders nesses hosts (anti-SSRF)
-	responderURL string        // se setado, ignora a AIA do cert e consulta sempre este responder
-	now          func() time.Time
+	httpClient    *http.Client
+	cache         *cache
+	maxBodyBytes  int64
+	cacheCap      time.Duration // teto do TTL de cache, independente do nextUpdate
+	maxAge        time.Duration // idade máxima tolerada de uma resposta sem nextUpdate
+	allowedHosts  []string      // se não vazio, só consulta responders nesses hosts (anti-SSRF)
+	responderURL  string        // se setado, ignora a AIA do cert e consulta sempre este responder
+	now           func() time.Time
+	flightTimeout time.Duration      // teto da consulta compartilhada (singleflight), desacoplada do líder
+	sf            singleflight.Group // coalesce consultas concorrentes ao mesmo cert em cache frio
 }
 
 // Option configura o Verifier.
@@ -130,12 +133,13 @@ func (v *Verifier) hostAllowed(rawURL string) bool {
 // New cria um Verifier.
 func New(opts ...Option) *Verifier {
 	v := &Verifier{
-		httpClient:   noRedirectClient(5 * time.Second),
-		cache:        newCache(4096),
-		maxBodyBytes: 1 << 20, // 1 MiB; respostas OCSP são pequenas
-		cacheCap:     10 * time.Minute,
-		maxAge:       24 * time.Hour, // resposta sem nextUpdate só vale por este tempo após thisUpdate
-		now:          time.Now,
+		httpClient:    noRedirectClient(5 * time.Second),
+		cache:         newCache(4096),
+		maxBodyBytes:  1 << 20, // 1 MiB; respostas OCSP são pequenas
+		cacheCap:      10 * time.Minute,
+		maxAge:        24 * time.Hour, // resposta sem nextUpdate só vale por este tempo após thisUpdate
+		now:           time.Now,
+		flightTimeout: 30 * time.Second, // teto da consulta compartilhada (bem acima do timeout por-request)
 	}
 	for _, o := range opts {
 		o(v)
@@ -152,10 +156,40 @@ func (v *Verifier) Check(ctx context.Context, cert, issuer *x509.Certificate) (S
 	if cert == nil || issuer == nil {
 		return StatusUnknown, errors.New("cert ou issuer nulo")
 	}
-	if hit, ok := v.cache.get(cacheKey(cert, issuer), v.now()); ok {
+	key := cacheKey(cert, issuer)
+	if hit, ok := v.cache.get(key, v.now()); ok {
 		return hit, nil
 	}
 
+	// singleflight: requisições concorrentes para o MESMO cert em cache frio coalescem numa
+	// única consulta ao responder (evita a tempestade de N chamadas OCSP idênticas sob carga).
+	// DoChan + contexto compartilhado desacoplado do líder: cancelar um chamador (líder ou
+	// waiter) NÃO derruba a consulta compartilhada nem os outros waiters — cada um apenas
+	// desiste da PRÓPRIA espera via o seu ctx. Sem isso, um líder que expira negaria waiters
+	// válidos, e um waiter cancelado ficaria preso até a consulta compartilhada terminar.
+	ch := v.sf.DoChan(key, func() (interface{}, error) {
+		// Outra flight pode ter preenchido o cache enquanto esperávamos a vez.
+		if hit, ok := v.cache.get(key, v.now()); ok {
+			return hit, nil
+		}
+		cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), v.flightTimeout)
+		defer cancel()
+		return v.lookup(cctx, cert, issuer, key)
+	})
+	select {
+	case <-ctx.Done():
+		return StatusUnknown, ctx.Err()
+	case r := <-ch:
+		if r.Err != nil {
+			return StatusUnknown, r.Err
+		}
+		return r.Val.(Status), nil
+	}
+}
+
+// lookup consulta o(s) responder(es) OCSP (sem cache) e cacheia o resultado conclusivo.
+// É o corpo do cache-miss, chamado dentro do singleflight.
+func (v *Verifier) lookup(ctx context.Context, cert, issuer *x509.Certificate, key string) (Status, error) {
 	// responderURL (quando setado) sobrescreve a AIA do cert — equivale ao `ssl_ocsp_responder`
 	// do nginx: ignora a AIA e consulta sempre este endpoint fixo (ex.: o OCSP do Vault no nó
 	// ativo). Útil quando os certs não trazem AIA ou para forçar o nó ativo.
@@ -191,7 +225,7 @@ func (v *Verifier) Check(ctx context.Context, cert, issuer *x509.Certificate) (S
 			lastErr = err
 			continue
 		}
-		v.cache.put(cacheKey(cert, issuer), status, cacheExpiry(resp, v.now(), v.cacheCap, v.maxAge))
+		v.cache.put(key, status, cacheExpiry(resp, v.now(), v.cacheCap, v.maxAge))
 		return status, nil
 	}
 	return StatusUnknown, fmt.Errorf("todos os responders OCSP falharam: %w", lastErr)
