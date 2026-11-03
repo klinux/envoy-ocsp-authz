@@ -42,8 +42,8 @@ certs frescos, revoga um, e roda a matriz (válido→allow+header, cache hit, re
 header vazio→sem injeção, responder morto→fail-closed) contra o responder OCSP do Vault:
 
 ```bash
-VAULT_ADDR=https://vault.stage.cora.local \
-VAULT_TOKEN="$(cat ~/.vault-stage.token)" \
-VAULT_PKI=cora_int_direta_pki VAULT_ROLE=cora-integration \
+VAULT_ADDR=https://vault.example.internal \
+VAULT_TOKEN="$(cat ~/.vault.token)" \
+VAULT_PKI=client_pki VAULT_ROLE=client-issuer \
 go test -tags integration -run TestE2E -v ./internal/authz/
 ```

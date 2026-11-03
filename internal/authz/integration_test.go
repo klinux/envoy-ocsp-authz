@@ -5,9 +5,9 @@
 //
 // Emite certs frescos na hora, então não depende de material pré-gerado. Rodar com:
 //
-//	VAULT_ADDR=https://vault.stage.cora.local \
-//	VAULT_TOKEN="$(cat ~/.vault-stage.token)" \
-//	VAULT_PKI=cora_int_direta_pki VAULT_ROLE=cora-integration \
+//	VAULT_ADDR=https://vault.example.internal \
+//	VAULT_TOKEN="$(cat ~/.vault.token)" \
+//	VAULT_PKI=client_pki VAULT_ROLE=client-issuer \
 //	go test -tags integration -run TestE2E -v ./internal/authz/
 package authz
 
@@ -40,8 +40,8 @@ func vaultFromEnv(t *testing.T) *vaultClient {
 	v := &vaultClient{
 		addr:  os.Getenv("VAULT_ADDR"),
 		token: os.Getenv("VAULT_TOKEN"),
-		pki:   envOr("VAULT_PKI", "cora_int_direta_pki"),
-		role:  envOr("VAULT_ROLE", "cora-integration"),
+		pki:   envOr("VAULT_PKI", "client_pki"),
+		role:  envOr("VAULT_ROLE", "client-issuer"),
 		// TLS interno do Vault; teste-only.
 		hc: &http.Client{Timeout: 15 * time.Second, Transport: &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}}},
 	}

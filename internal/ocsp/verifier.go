@@ -3,7 +3,7 @@
 // emissora, pergunta ao responder OCSP (o do Vault, pela AIA do próprio cert) e devolve
 // Good / Revoked / Unknown.
 //
-// Rigor (validado contra o Vault de stage, mount cora_int_direta_pki):
+// Rigor (validado contra um Vault PKI real):
 //   - a assinatura da resposta é conferida contra a CA emissora (ou um responder delegado
 //     com EKU id-kp-OCSPSigning), via x/crypto/ocsp.ParseResponseForCert;
 //   - a janela thisUpdate/nextUpdate é checada com tolerância de clock;
